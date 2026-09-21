@@ -1,0 +1,24 @@
+# Virtual Environment
+.venv/
+venv/
+env/
+
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Test / Cache artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Output directory generated audio files (keep sample_audio/)
+output/*.wav
+
+# IDE and OS metadata
+.idea/
+.vscode/
+Thumbs.db
+Desktop.ini
+.DS_Store

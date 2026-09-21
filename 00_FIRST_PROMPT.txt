@@ -1,0 +1,26 @@
+We are building an academic Signals and Systems mini project called:
+
+"Audio Signal Analyzer and Noise Reduction System Using FFT"
+
+I have placed the project specification and AGENTS.md in this workspace.
+
+Before writing code, inspect the workspace and read:
+- AGENTS.md
+- 01_PROJECT_SPEC.md
+- 03_IMPLEMENTATION_PLAN.md
+
+Then:
+1. Inspect the current folder.
+2. Check the operating system and Python version.
+3. Check whether a virtual environment exists.
+4. Check whether this is an empty or existing project.
+5. Propose the smallest reliable implementation plan.
+6. Do not add optional features.
+7. Do not generate the full application yet.
+
+After inspection, report:
+- what you found
+- what files you will create first
+- exact command you expect to use to run the project
+
+Do not implement the full application yet.

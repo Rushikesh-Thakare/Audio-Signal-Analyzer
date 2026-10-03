@@ -324,4 +324,4 @@ For each concept:
 - explain why we use it
 - give one viva answer
 
-Do not assume I know electronics or DSP.
+Do not assume I know electronics or DSP,.

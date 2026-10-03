@@ -178,6 +178,52 @@ class TestGUIWorkflow(unittest.TestCase):
             self.assertIn("Recording error", self.window.status_label.text())
             mock_warn.assert_called_once()
 
+    def test_primary_spectral_denoising_workflow_gui(self):
+        """
+        Verify primary speech spectral denoising workflow from the UI:
+        Load Audio -> Select Spectral Method & Strength -> Process & Clean -> Check Metrics & Spectrogram
+        """
+        meta = load_audio(self.sample_wav)
+        self.window.audio_meta = meta
+        self.window.clean_signal = meta["mono_data"]
+        self.window.fs = meta["fs"]
+        self.window.btn_process_audio.setEnabled(True)
+
+        # 1. Select Spectral Gating method (index 0)
+        self.window.combo_method.setCurrentIndex(0)
+        self.assertFalse(self.window.panel_spectral.isHidden())
+        self.assertTrue(self.window.panel_butterworth.isHidden())
+
+        # 2. Adjust strength slider to 85%
+        self.window.slider_strength.setValue(85)
+        self.assertIn("85%", self.window.lbl_strength_val.text())
+
+        # 3. Trigger processing
+        self.window.on_process_audio()
+
+        # 4. Verify processed audio and button state
+        self.assertIsNotNone(self.window.filtered_signal)
+        self.assertEqual(len(self.window.filtered_signal), len(self.window.clean_signal))
+        self.assertTrue(self.window.btn_play_filt.isEnabled())
+        self.assertTrue(self.window.btn_save_wav.isEnabled())
+
+        # 5. Verify honest unreferenced metrics are populated
+        self.assertIn("Noise Floor Attenuation:", self.window.lbl_noise_attenuation.text())
+        self.assertIn("Speech Energy Retention:", self.window.lbl_speech_retention.text())
+        self.assertIn("N/A", self.window.lbl_snr_before.text())
+
+    def test_noise_profile_custom_range_visibility(self):
+        """Verify noise profile combo toggles custom start/end spinboxes visibility."""
+        # Index 0: Auto-detect
+        self.window.combo_noise_profile.setCurrentIndex(0)
+        self.assertTrue(self.window.spin_noise_start.isHidden())
+
+        # Index 2: Custom Range
+        self.window.combo_noise_profile.setCurrentIndex(2)
+        self.assertFalse(self.window.spin_noise_start.isHidden())
+        self.assertFalse(self.window.spin_noise_end.isHidden())
+
 
 if __name__ == "__main__":
     unittest.main()
+

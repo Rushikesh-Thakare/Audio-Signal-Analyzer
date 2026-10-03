@@ -743,4 +743,517 @@ def compute_filter_response(
     return freqs, mag_single_db, mag_effective_db
 
 
+# ==============================================================================
+# Speech-Suitable Spectral Gating & Noise Profile Analysis (for LINA & Academic Demo)
+# ==============================================================================
+
+
+def detect_noise_segment(
+    signal: np.ndarray, fs: int, segment_duration_s: float = 0.3
+) -> Tuple[int, int, str]:
+    """
+    Intelligently detect a noise-only candidate segment within an audio signal.
+
+    Design & Methodological Rationale:
+    We DO NOT blindly assume that the initial segment (e.g. first 0.3s) is always noise,
+    because in real-world recordings (such as LINA voice commands), the speaker might begin
+    speaking immediately upon recording trigger. Blindly sampling the first 0.3s in such cases
+    would treat speech formants as background noise and attenuate them.
+
+    Algorithm:
+    1. If the audio is shorter than the requested duration, use the full signal.
+    2. Divide the signal into overlapping sliding analysis windows (each of length segment_duration_s).
+    3. Measure the Root-Mean-Square (RMS) energy in each window.
+    4. Find the window with the minimum RMS energy (the quietest stationary interval).
+    5. Compare the initial window [0, segment_duration_s] with the global minimum:
+       - If the initial window's energy is within 3 dB (factor of ~1.41) of the minimum,
+         it indicates the speaker paused before talking, and the leading pause is selected.
+       - Otherwise, the user spoke immediately, so the algorithm selects the global minimum-energy
+         window (e.g., inter-word pause or background silence interval).
+
+    Args:
+        signal: 1D numpy array of audio samples.
+        fs: Sampling frequency in Hz.
+        segment_duration_s: Length of the noise estimation window in seconds (default 0.3s).
+
+    Returns:
+        Tuple[int, int, str]: (start_sample_index, end_sample_index, method_description)
+    """
+    if signal.size == 0:
+        return 0, 0, "Empty Signal"
+
+    win_samples = max(16, int(segment_duration_s * fs))
+    n_samples = len(signal)
+
+    if n_samples <= win_samples:
+        return 0, n_samples, f"Full Signal ({n_samples / fs:.2f}s)"
+
+    # Step size: 50% overlap for fast search
+    step = max(1, win_samples // 2)
+    starts = list(range(0, n_samples - win_samples + 1, step))
+
+    min_rms = float("inf")
+    best_start = 0
+
+    for s in starts:
+        chunk = signal[s : s + win_samples]
+        rms = float(np.sqrt(np.mean(np.square(chunk, dtype=np.float64))))
+        if rms < min_rms:
+            min_rms = rms
+            best_start = s
+
+    # Evaluate initial window energy
+    init_chunk = signal[0:win_samples]
+    init_rms = float(np.sqrt(np.mean(np.square(init_chunk, dtype=np.float64))))
+
+    # 3 dB energy threshold is a factor of sqrt(2) ≈ 1.414 on RMS
+    if init_rms <= 1.414 * min_rms or init_rms < 1e-4:
+        start_idx = 0
+        end_idx = win_samples
+        method = f"Leading Inactive Segment (0.00s – {win_samples / fs:.2f}s)"
+    else:
+        start_idx = best_start
+        end_idx = best_start + win_samples
+        t0 = start_idx / fs
+        t1 = end_idx / fs
+        method = f"Auto-Detected Quietest Segment ({t0:.2f}s – {t1:.2f}s)"
+
+    return start_idx, end_idx, method
+
+
+def estimate_noise_profile(
+    signal: np.ndarray,
+    fs: int,
+    start_s: Optional[float] = None,
+    end_s: Optional[float] = None,
+    fallback_duration_s: float = 0.3,
+    nperseg: Optional[int] = None,
+    noverlap: Optional[int] = None,
+) -> Dict[str, Any]:
+    """
+    Estimate the frequency-dependent noise magnitude spectrum profile.
+
+    Computes the mean and standard deviation of spectral magnitude across time frames
+    within the selected noise-only segment:
+        mu_noise(f)  = (1 / M) * sum_{m=1}^M |Y_noise(f, m)|
+        sigma_noise(f) = sqrt((1 / M) * sum_{m=1}^M (|Y_noise(f, m)| - mu_noise(f))^2)
+
+    Selection Priority:
+    1. User-Specified Segment: If start_s and end_s are provided and valid, they are used.
+    2. Documented Automatic Fallback: Uses `detect_noise_segment` to find the quietest pause.
+
+    Args:
+        signal: 1D numpy array of audio samples.
+        fs: Sampling rate in Hz.
+        start_s: Optional manual start time in seconds.
+        end_s: Optional manual end time in seconds.
+        fallback_duration_s: Duration in seconds for automatic detection (default 0.3s).
+        nperseg: STFT window size (samples). Defaults dynamically based on fs.
+        noverlap: STFT overlap (samples). Defaults to 75% of nperseg.
+
+    Returns:
+        dict: Noise profile containing mean_mag, std_mag, time range, and metadata.
+    """
+    if signal.size == 0:
+        raise ValueError("Cannot estimate noise profile from an empty signal.")
+
+    n_samples = len(signal)
+    duration = n_samples / float(fs)
+
+    # 1. Determine noise segment bounds
+    if start_s is not None and end_s is not None:
+        start_s_clamped = max(0.0, min(float(start_s), duration))
+        end_s_clamped = max(start_s_clamped + 0.01, min(float(end_s), duration))
+        start_idx = int(start_s_clamped * fs)
+        end_idx = min(n_samples, int(end_s_clamped * fs))
+        method = f"User-Selected Segment ({start_s_clamped:.2f}s – {end_s_clamped:.2f}s)"
+    else:
+        start_idx, end_idx, method = detect_noise_segment(
+            signal, fs, segment_duration_s=fallback_duration_s
+        )
+
+    noise_segment = signal[start_idx:end_idx]
+    if noise_segment.size == 0:
+        noise_segment = signal
+
+    # 2. Configure STFT parameters dynamically
+    if nperseg is None:
+        # Standard speech analysis window: ~25-35 ms (512 @ 16kHz, 1024 @ 44.1kHz)
+        target_win = int(fs * 0.032)
+        nperseg = 1 << int(np.round(np.log2(max(64, target_win))))
+        # Constrain to segment length and bounds
+        nperseg = min(2048, max(64, nperseg))
+        if len(noise_segment) < nperseg:
+            nperseg = max(32, 1 << int(np.floor(np.log2(max(32, len(noise_segment))))))
+
+    if noverlap is None:
+        noverlap = int(nperseg * 0.75)
+
+    # 3. Compute STFT over the noise segment
+    f, t_noise, zxx_noise = scipy.signal.stft(
+        noise_segment,
+        fs=fs,
+        window="hann",
+        nperseg=nperseg,
+        noverlap=noverlap,
+        boundary="zeros",
+    )
+
+    mag_noise = np.abs(zxx_noise)
+    mean_mag = np.mean(mag_noise, axis=1)
+    std_mag = np.std(mag_noise, axis=1)
+
+    return {
+        "mean_mag": mean_mag,
+        "std_mag": std_mag,
+        "freqs": f,
+        "start_s": float(start_idx) / float(fs),
+        "end_s": float(end_idx) / float(fs),
+        "start_idx": start_idx,
+        "end_idx": end_idx,
+        "method": method,
+        "nperseg": nperseg,
+        "noverlap": noverlap,
+    }
+
+
+def spectral_gate_denoise(
+    signal: np.ndarray,
+    fs: int,
+    strength: float = 0.75,
+    noise_profile: Optional[Dict[str, Any]] = None,
+    noise_start_s: Optional[float] = None,
+    noise_end_s: Optional[float] = None,
+    spectral_floor: float = 0.05,
+    time_smoothing: bool = True,
+) -> Tuple[np.ndarray, Dict[str, Any]]:
+    """
+    Apply speech-preserving spectral gating noise reduction via Short-Time Fourier Transform.
+
+    Signals & Systems Principles:
+    1. Short-Time Fourier Transform (STFT):
+       Decomposes discrete audio x[n] into time-frequency tiles:
+           X(f, t) = |X(f, t)| * exp(j * phi(f, t))
+    2. Adaptive Noise Gating:
+       Calculates a frequency-dependent noise threshold T(f):
+           T(f) = mu_noise(f) + 1.2 * sigma_noise(f)
+    3. Soft-Knee Wiener-Type Gain Mask:
+       Rather than binary/hard gating (which creates severe musical noise chirps),
+       we apply a continuous, smooth gain curve:
+           G(f, t) = 1 / (1 + (strength * T(f) / (|Y(f, t)| + eps))^2)
+       where `strength` (0.0 to 1.5) scales the attenuation severity.
+    4. Spectral Floor:
+       Enforces a minimum attenuation floor G(f, t) >= spectral_floor (default 0.05 = -26 dB)
+       to preserve ambient room naturalness and prevent audible speech cutouts.
+    5. Time Smoothing:
+       Smoothes gain coefficients across adjacent time frames to suppress single-frame
+       musical chirps without blurring speech transients.
+    6. Inverse STFT (ISTFT) Synthesis:
+       Reconstructs time-domain signal with zero phase alteration:
+           x_hat[n] = ISTFT(G(f, t) * |Y(f, t)| * exp(j * phi(f, t)))
+
+    Args:
+        signal: 1D numpy array of input audio.
+        fs: Sampling rate in Hz.
+        strength: Reduction severity from 0.0 (no reduction) to 1.5 (heavy reduction).
+        noise_profile: Pre-calculated noise profile dict (optional).
+        noise_start_s: Optional start of noise-only segment in seconds.
+        noise_end_s: Optional end of noise-only segment in seconds.
+        spectral_floor: Minimum gain floor (default 0.05 = -26 dB) to prevent musical noise.
+        time_smoothing: Whether to apply temporal recursive smoothing to the gain mask.
+
+    Returns:
+        Tuple[np.ndarray, dict]: (cleaned_audio_signal, metadata_dict)
+    """
+    if signal.size == 0:
+        raise ValueError("Cannot denoise an empty signal.")
+    if fs <= 0:
+        raise ValueError(f"Invalid sampling rate: {fs}")
+
+    n_samples = len(signal)
+    strength_clamped = max(0.0, min(float(strength), 2.0))
+    floor_clamped = max(0.01, min(float(spectral_floor), 0.5))
+
+    # Fast bypass if strength is zero
+    if strength_clamped <= 1e-4:
+        return signal.astype(np.float32, copy=True), {
+            "strength": 0.0,
+            "method": "Bypass (Strength = 0)",
+            "noise_profile": None,
+        }
+
+    # Handle very short signals (fewer than 64 samples)
+    if n_samples < 64:
+        return signal.astype(np.float32, copy=True), {
+            "strength": strength_clamped,
+            "method": "Signal Too Short for STFT Gating",
+            "noise_profile": None,
+        }
+
+    # 1. Estimate or validate noise profile
+    if noise_profile is None:
+        noise_profile = estimate_noise_profile(
+            signal,
+            fs=fs,
+            start_s=noise_start_s,
+            end_s=noise_end_s,
+            fallback_duration_s=0.3,
+        )
+
+    nperseg = noise_profile["nperseg"]
+    noverlap = noise_profile["noverlap"]
+    mean_mag = noise_profile["mean_mag"]
+    std_mag = noise_profile["std_mag"]
+
+    # 2. STFT Analysis of entire audio signal
+    f, t_frames, zxx = scipy.signal.stft(
+        signal.astype(np.float64),
+        fs=fs,
+        window="hann",
+        nperseg=nperseg,
+        noverlap=noverlap,
+        boundary="zeros",
+    )
+
+    mag = np.abs(zxx)
+    phase = np.angle(zxx)
+
+    # 3. Compute frequency-dependent noise threshold
+    # Reshape (F, 1) for broadcasting across time frames (F, T)
+    thresh = (mean_mag + 1.2 * std_mag)[:, np.newaxis]
+    thresh = np.maximum(thresh, 1e-12)
+
+    # 4. Compute continuous soft-knee gain mask
+    # Low SNR -> G approaches spectral_floor; High SNR -> G approaches 1.0
+    snr_prio = mag / thresh
+    inv_snr = strength_clamped / (snr_prio + 1e-12)
+    gain = 1.0 / (1.0 + np.square(inv_snr))
+    gain = np.maximum(floor_clamped, gain)
+
+    # 5. Temporal inter-frame recursive smoothing (eliminates musical noise spikes)
+    if time_smoothing and gain.shape[1] > 1:
+        alpha_t = 0.35  # Smoothing factor
+        smoothed_gain = np.copy(gain)
+        for col in range(1, smoothed_gain.shape[1]):
+            smoothed_gain[:, col] = (
+                alpha_t * gain[:, col] + (1.0 - alpha_t) * smoothed_gain[:, col - 1]
+            )
+        effective_gain = smoothed_gain
+    else:
+        effective_gain = gain
+
+    # 6. Synthesize filtered complex spectrum
+    zxx_clean = (effective_gain * mag) * np.exp(1j * phase)
+
+    # 7. Inverse STFT Re-synthesis
+    _, reconstructed = scipy.signal.istft(
+        zxx_clean,
+        fs=fs,
+        window="hann",
+        nperseg=nperseg,
+        noverlap=noverlap,
+        boundary="zeros",
+    )
+
+    # 8. Align sample length and prevent clipping
+    if len(reconstructed) > n_samples:
+        reconstructed = reconstructed[:n_samples]
+    elif len(reconstructed) < n_samples:
+        reconstructed = np.pad(reconstructed, (0, n_samples - len(reconstructed)))
+
+    # Clamp amplitude safely to [-1.0, 1.0]
+    cleaned_signal = np.clip(reconstructed, -1.0, 1.0).astype(np.float32)
+
+    # 9. Compute unreferenced performance metrics
+    metrics = calculate_unreferenced_metrics(
+        noisy_signal=signal,
+        cleaned_signal=cleaned_signal,
+        fs=fs,
+        noise_start_s=noise_profile.get("start_s"),
+        noise_end_s=noise_profile.get("end_s"),
+    )
+    metrics["strength"] = strength_clamped
+    metrics["noise_profile"] = noise_profile
+
+    return cleaned_signal, metrics
+
+
+def denoise_audio(
+    audio: np.ndarray,
+    fs: int,
+    strength: float = 0.75,
+    noise_start_s: Optional[float] = None,
+    noise_end_s: Optional[float] = None,
+    spectral_floor: float = 0.05,
+) -> np.ndarray:
+    """
+    Standalone speech denoising function for the LINA Linux Voice Assistant.
+
+    Decoupled Architecture:
+    This function has ZERO graphical dependencies and accepts a raw 1D numpy array
+    and sampling rate. LINA or any downstream pipeline can directly invoke:
+        from signal_processing import denoise_audio
+        clean_audio = denoise_audio(raw_mic_audio, fs=16000)
+
+    Args:
+        audio: 1D numpy array representing input audio samples.
+        fs: Sampling rate in Hz.
+        strength: Reduction severity (default 0.75).
+        noise_start_s: Optional start of stationary noise segment in seconds.
+        noise_end_s: Optional end of stationary noise segment in seconds.
+        spectral_floor: Minimum spectral floor (default 0.05).
+
+    Returns:
+        np.ndarray: Cleaned 1D float32 audio array.
+    """
+    cleaned, _ = spectral_gate_denoise(
+        signal=audio,
+        fs=fs,
+        strength=strength,
+        noise_start_s=noise_start_s,
+        noise_end_s=noise_end_s,
+        spectral_floor=spectral_floor,
+        time_smoothing=True,
+    )
+    return cleaned
+
+
+def calculate_unreferenced_metrics(
+    noisy_signal: np.ndarray,
+    cleaned_signal: np.ndarray,
+    fs: int,
+    noise_start_s: Optional[float] = None,
+    noise_end_s: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Calculate objective quality metrics for real-world unreferenced audio.
+
+    Academic Honesty & Scientific Integrity:
+    Real audio recordings have NO clean ground-truth reference x[n]. Therefore,
+    evaluating SNR against the noisy signal or inventing an SNR number is mathematically
+    untrue. Instead, we report honest, physically meaningful quantities:
+    1. Noise Floor Attenuation (dB):
+       The decibel drop in RMS power measured on the stationary noise segment:
+           Delta Noise (dB) = 20 * log10(RMS_noisy_noise / (RMS_clean_noise + eps))
+    2. Speech Energy Retention Ratio (%):
+       The ratio of active signal energy preserved after denoising (ensures speech wasn't muted):
+           Retention = RMS_clean_active / (RMS_noisy_active + eps)
+    3. Total RMS Delta (dB):
+       Overall energy change across the entire recording.
+    4. Ground-Truth SNR:
+       Honestly reported as None / 'N/A' because no clean ground-truth exists.
+
+    Args:
+        noisy_signal: 1D numpy array of input noisy audio.
+        cleaned_signal: 1D numpy array of denoised audio.
+        fs: Sampling rate in Hz.
+        noise_start_s: Optional start time of noise interval.
+        noise_end_s: Optional end time of noise interval.
+
+    Returns:
+        dict: Honestly computed physical measurements.
+    """
+    if noisy_signal.size == 0 or cleaned_signal.size == 0:
+        return {
+            "ground_truth_snr": None,
+            "noise_floor_reduction_db": 0.0,
+            "speech_retention_ratio": 1.0,
+            "rms_noisy": 0.0,
+            "rms_cleaned": 0.0,
+            "rms_change_db": 0.0,
+        }
+
+    # Total RMS values
+    rms_noisy = float(np.sqrt(np.mean(np.square(noisy_signal, dtype=np.float64))))
+    rms_cleaned = float(np.sqrt(np.mean(np.square(cleaned_signal, dtype=np.float64))))
+
+    if rms_noisy > 1e-12:
+        rms_change_db = float(20.0 * np.log10((rms_cleaned + 1e-12) / rms_noisy))
+    else:
+        rms_change_db = 0.0
+
+    # Locate noise segment for noise floor reduction measurement
+    if noise_start_s is not None and noise_end_s is not None:
+        s_idx = max(0, int(noise_start_s * fs))
+        e_idx = min(len(noisy_signal), int(noise_end_s * fs))
+    else:
+        s_idx, e_idx, _ = detect_noise_segment(noisy_signal, fs, segment_duration_s=0.3)
+
+    if e_idx > s_idx:
+        noise_noisy_chunk = noisy_signal[s_idx:e_idx]
+        noise_clean_chunk = cleaned_signal[s_idx:e_idx]
+        rms_noise_before = float(np.sqrt(np.mean(np.square(noise_noisy_chunk, dtype=np.float64))))
+        rms_noise_after = float(np.sqrt(np.mean(np.square(noise_clean_chunk, dtype=np.float64))))
+
+        if rms_noise_after > 1e-12 and rms_noise_before > 1e-12:
+            noise_floor_attenuation_db = float(
+                20.0 * np.log10(rms_noise_before / rms_noise_after)
+            )
+        else:
+            noise_floor_attenuation_db = 0.0
+    else:
+        noise_floor_attenuation_db = 0.0
+
+    # Locate active speech regions (samples where amplitude > 2 * noise floor)
+    thresh_active = max(0.01, 2.0 * rms_noisy)
+    active_mask = np.abs(noisy_signal) > thresh_active
+
+    if np.any(active_mask):
+        act_noisy_rms = float(np.sqrt(np.mean(np.square(noisy_signal[active_mask], dtype=np.float64))))
+        act_clean_rms = float(np.sqrt(np.mean(np.square(cleaned_signal[active_mask], dtype=np.float64))))
+        speech_retention = float(act_clean_rms / (act_noisy_rms + 1e-12))
+    else:
+        speech_retention = float(rms_cleaned / (rms_noisy + 1e-12))
+
+    return {
+        "ground_truth_snr": None,
+        "noise_floor_reduction_db": noise_floor_attenuation_db,
+        "speech_retention_ratio": speech_retention,
+        "rms_noisy": rms_noisy,
+        "rms_cleaned": rms_cleaned,
+        "rms_change_db": rms_change_db,
+    }
+
+
+def compute_spectrogram(
+    signal: np.ndarray,
+    fs: int,
+    nperseg: int = 512,
+    noverlap: int = 384,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Compute the Time-Frequency Spectrogram (STFT Power Density) in decibels.
+
+    Args:
+        signal: 1D numpy array of audio samples.
+        fs: Sampling rate in Hz.
+        nperseg: Window segment length (default 512).
+        noverlap: Segment overlap (default 384, 75% overlap).
+
+    Returns:
+        Tuple[np.ndarray, np.ndarray, np.ndarray]: (frequencies, times, Sxx_db)
+    """
+    if signal.size == 0:
+        return np.array([]), np.array([]), np.empty((0, 0))
+
+    # Scale nperseg for very short signals
+    actual_nperseg = min(nperseg, max(16, len(signal)))
+    actual_noverlap = min(noverlap, actual_nperseg - 1)
+
+    freqs, times, sxx = scipy.signal.spectrogram(
+        signal,
+        fs=fs,
+        window="hann",
+        nperseg=actual_nperseg,
+        noverlap=actual_noverlap,
+        scaling="density",
+        mode="psd",
+    )
+
+    # Convert to dB with -100 dB floor
+    sxx_db = 10.0 * np.log10(np.maximum(sxx, 1e-10))
+    return freqs, times, sxx_db
+
+
+
 

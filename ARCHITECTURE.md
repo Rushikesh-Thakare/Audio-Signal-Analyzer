@@ -1,17 +1,18 @@
 # System Architecture & DSP Pipeline Specification
 
-This document details the architectural design, module relationships, and mathematical signal processing pipeline implemented in the **Audio Signal Analyzer and Noise Reduction System Using FFT**.
+This document details the architectural design, module relationships, and mathematical signal processing pipeline implemented in the **Audio Signal Analyzer and Noise Reduction System Using FFT**, including standalone integration for the **LINA Linux Voice Assistant**.
 
 ---
 
 ## 1. High-Level System Architecture
 
-The application adopts a clean **Model-View-Controller (MVC)** inspired architecture tailored for scientific computing and digital signal processing in Python:
+The application adopts a **decoupled Model-View-Controller (MVC)** architecture tailored for scientific computing, digital signal processing, and external voice assistant integration in Python:
 
-- **View & Interaction Layer (`gui.py` & `app.py`):** PySide6 (Qt) graphical widgets, asynchronous worker threads (`QThread`), and embedded Matplotlib canvas figures.
-- **Controller / Dispatcher Layer (`gui.py` slots):** Handles user interactions, executes validation checks, and dispatches data between UI controls and the DSP engine.
-- **DSP Engine / Core Model (`signal_processing.py`):** Pure numerical processing functions executing Fourier transforms, Gaussian noise generation, IIR filter synthesis, and SNR evaluations using NumPy and SciPy.
-- **Audio I/O Subsystem (`audio_io.py`):** Hardware and filesystem abstraction for reading/writing WAV files, stereo downmixing, safe playback with `sounddevice`, and optional microphone capture.
+- **Presentation Layer (`gui.py` & `app.py`):** PySide6 graphical widgets, background threads (`RecordWorker`), and embedded Matplotlib canvas figures (`FigureCanvasQTAgg`).
+- **Controller / Dispatcher Layer (`gui.py` slots):** Handles user interactions, executes validation checks, manages dual evaluation models, and dispatches data.
+- **DSP Engine / Core Model (`signal_processing.py`):** Pure numerical processing functions executing Short-Time Fourier Transforms (STFT), spectral gating, noise profile estimation, Butterworth IIR filter synthesis, and dual metric evaluations using NumPy and SciPy.
+- **LINA Decoupled Interface (`signal_processing.denoise_audio`):** A lightweight, standalone Python entry point requiring zero GUI dependencies, directly callable by downstream automated speech recognition (ASR) pipelines.
+- **Audio I/O Subsystem (`audio_io.py`):** Filesystem and hardware abstraction for reading/writing WAV files, stereo-to-mono downmixing, safe playback with `sounddevice`, and microphone capture.
 
 ---
 
@@ -19,30 +20,36 @@ The application adopts a clean **Model-View-Controller (MVC)** inspired architec
 
 ```mermaid
 graph TD
-    subgraph UI_Layer ["Presentation & Interaction Layer (PySide6 + Matplotlib)"]
-        A[app.py Entry Point] --> B[MainWindow in gui.py]
-        B --> C[Control Panels: Load, Noise, Filter, Play, Reset]
-        B --> D[Matplotlib Canvases: 3-Stage Overview & Detailed Tabs]
+    subgraph LINA_Integration ["External Linux Voice Assistant (LINA)"]
+        LINA_Mic[Raw Microphone Stream] --> LINA_Hook["denoise_audio(audio, fs, strength)"]
+        LINA_Hook --> LINA_ASR[Speech-to-Text / Intent Recognition Engine]
+    end
+
+    subgraph UI_Layer ["Desktop Presentation Layer (PySide6 + Matplotlib)"]
+        A[app.py Launcher] --> B[MainWindow in gui.py]
+        B --> C[Control Panels: Ingestion, Spectral Denoising, Playback, Metrics]
+        B --> D[Visualizations: Comparison, Zoomed Waveforms, FFT, Spectrogram]
         B --> E[RecordWorker QThread]
     end
 
     subgraph Audio_Subsystem ["Audio I/O Subsystem (audio_io.py)"]
         F[load_audio] -->|Read WAV| FS[(File System)]
         G[save_audio] -->|Write Clamped WAV| FS
-        H[to_mono] -->|Downmix| F
+        H[to_mono] -->|Downmix Channel Averaging| F
         I[play_audio / stop_audio] -->|Sound Stream| SPK[Speakers / Headphones]
         J[record_audio] -->|Live Capture| MIC[Microphone Input]
         E -->|Worker Hook| J
     end
 
     subgraph DSP_Engine ["DSP Signal Processing Core (signal_processing.py)"]
-        K[compute_time_axis]
+        K[compute_time_axis / compute_rms]
         L[compute_fft / find_peak_frequency]
-        M[add_white_gaussian_noise]
-        N[design_butterworth_filter]
-        O[apply_filter via sosfiltfilt]
-        P[compute_filter_response via sosfreqz]
-        Q[calculate_snr Ground Truth]
+        M[detect_noise_segment / estimate_noise_profile]
+        N[spectral_gate_denoise: STFT + Soft Wiener Mask + ISTFT]
+        O[compute_spectrogram: Time-Frequency PSD]
+        P[apply_filter: Butterworth SOS zero-phase]
+        Q[calculate_unreferenced_metrics: Noise Attenuation & Speech Retention]
+        R[calculate_snr: Ground-Truth Benchmark Evaluation]
     end
 
     %% Wiring connections
@@ -52,20 +59,23 @@ graph TD
     C -->|Trigger Mic Record| E
     
     F -->|Raw Signal Arrays| B
-    B -->|Clean Signal x[n]| K
+    B -->|Input Signal x[n]| K
     B -->|Signal x[n], fs| L
-    B -->|Clean x[n], Target SNR| M
-    M -->|Noisy Signal y[n]| L
-    B -->|Filter Type, Cutoffs, fs| N
-    N -->|SOS Matrix| P
-    N -->|SOS Matrix, Noisy y[n]| O
-    O -->|Filtered Signal x_hat[n]| L
-    B -->|Clean x[n], Noisy / Filtered| Q
+    B -->|Signal x[n], fs| O
+    B -->|Signal x[n], fs, Range| M
+    M -->|Noise Threshold T_k| N
+    B -->|Signal, Strength, Threshold| N
+    N -->|Cleaned Signal x_hat[n]| L
+    N -->|Cleaned Signal x_hat[n]| O
+    N -->|Cleaned Signal, Input| Q
+    
+    LINA_Hook --> N
     
     L -->|Freqs & Magnitudes| D
     K -->|Time Vector| D
-    P -->|Bode Mag & Phase| D
-    Q -->|SNR Values (dB)| C
+    O -->|Spectrogram Matrices| D
+    Q -->|Unreferenced Metrics| C
+    R -->|Benchmark SNR dB| C
 ```
 
 ---
@@ -73,86 +83,104 @@ graph TD
 ## 3. Module Breakdown & Responsibilities
 
 ### 3.1 `app.py` — Application Entry Point
-- **Role:** Initializes the Qt runtime environment (`QApplication`), sets global typography (Segoe UI, 10pt standard font sizing), instantiates `MainWindow`, and starts the main event loop (`app.exec()`).
-- **Dependencies:** `PySide6.QtWidgets`, `PySide6.QtGui`, `gui.MainWindow`.
+- Initializes the Qt runtime environment (`QApplication`), sets application metadata, configures global typography (`Segoe UI`, 10pt standard font sizing), instantiates `MainWindow`, and starts the main event loop (`app.exec()`).
 
 ### 3.2 `gui.py` — Graphical User Interface & Visualizations
-- **Role:** Implements the complete desktop GUI window.
-  - Houses the sidebar control layout: File Loading, Microphone Recording, Metadata Grid, Noise Generator, Butterworth Filter Controls, SNR Metrics Display, Audio Playback Controls, and System Reset.
-  - Embeds interactive Matplotlib figures via `FigureCanvasQTAgg`:
-    - **Tab 0: Pipeline Overview:** $3 \times 2$ grid plotting Original vs. Noisy vs. Filtered waveforms and frequency spectra side-by-side.
-    - **Tab 1: Original Signal:** High-detail view of clean time-domain waveform and magnitude spectrum with peak frequency marker.
-    - **Tab 2: Noisy Signal:** High-detail view of corrupted waveform and elevated noise floor.
-    - **Tab 3: Filtered Signal:** High-detail view of restored waveform and cleaned spectrum.
-    - **Tab 4: Filter Response:** Bode magnitude (in dB) and phase (in degrees) plots showing the $-3\text{ dB}$ cutoff point and attenuation slopes.
-  - Implements `RecordWorker(QThread)` for non-blocking 3-second live microphone capture.
+- Implements the complete desktop GUI window with high-contrast, modern academic styling.
+- Houses sidebar control panels:
+  - **1. Audio Ingestion & Metadata:** Load WAV, Record 3s Mic, Reset Workspace, and Metadata Grid (duration, samples, channels, RMS, peak frequencies).
+  - **2. Noise Reduction & Denoising Engine:** Method selector (Speech Spectral Gating vs. Butterworth Filter), Reduction Strength slider (0% to 150%), Noise Profile strategy selector (Auto-detect quietest segment, leading 0.3s pause, or custom start/end time range), and Primary `Process & Clean Audio` button.
+  - **3. Audio Playback & Export:** Independent playback for Input Audio, Cleaned Audio, and Benchmark Noisy Audio, plus non-overwriting WAV export.
+  - **4. Quantitative Audio Evaluation:** Displays unreferenced measurements for real recordings and ground-truth metrics for benchmarks.
+  - **5. Academic Lab Benchmark Tool:** Optional synthetic AWGN generator with target SNR spinbox.
+- Embeds interactive Matplotlib figures via `MplCanvas`:
+  - **Tab 0: Pipeline Comparison:** Side-by-side Input vs. Cleaned waveforms and FFT spectra.
+  - **Tab 1: Input Audio:** High-detail view of input time waveform and magnitude spectrum with peak frequency marker.
+  - **Tab 2: Cleaned Audio:** High-detail view of cleaned time waveform and magnitude spectrum.
+  - **Tab 3: Time-Frequency Spectrogram:** Dual-row STFT spectrograms displaying power density heatmaps and vocal harmonic preservation.
+  - **Tab 4: Benchmark Noisy Audio:** Detailed view of corrupted signal when AWGN is injected.
+  - **Tab 5: Filter Frequency Response:** Bode magnitude response curves ($|H(f)|$) with $-3\text{ dB}$ cutoff markers.
 
 ### 3.3 `audio_io.py` — Audio File I/O & Hardware Abstraction
-- **Role:** Encapsulates all interactions with audio files and hardware devices.
-  - `load_audio(filepath)`: Reads WAV files, extracts sample rate, channel count, duration, raw data, and automatic downmixed mono data.
-  - `to_mono(audio_data)`: Converts stereo signals to mono via mathematical averaging $\frac{1}{2}(L + R)$.
+- Encapsulates file I/O and device interactions:
+  - `load_audio(filepath)`: Reads 16/24/32-bit PCM and float WAV files, extracts metadata, and averages multi-channel stereo to mono via `to_mono()`.
+  - `to_mono(audio_data)`: Converts stereo signals to 1D mono via arithmetic channel averaging: $x_{\text{mono}}[n] = \frac{1}{C}\sum_{c=1}^C x_c[n]$.
   - `calculate_rms(signal)`: Evaluates Root-Mean-Square signal amplitude.
-  - `save_audio(filepath, audio_data, fs)`: Exports processed audio with hard clipping enforcement strictly within $[-1.0, 1.0]$.
+  - `save_audio(filepath, audio_data, fs)`: Exports processed audio as 16-bit PCM WAV with hard clipping clamping strictly within $[-1.0, 1.0]$.
   - `play_audio(audio_data, fs)` & `stop_audio()`: Streams audio to output devices safely via `sounddevice` with non-crashing exception wrapping.
   - `is_microphone_available()` & `record_audio(duration, fs)`: Detects input recording hardware and captures calibrated 1D mono audio arrays.
 
 ### 3.4 `signal_processing.py` — Mathematical DSP Core
-- **Role:** Pure scientific computation library implementing all core Signals and Systems equations:
-  - `compute_time_axis(num_samples, fs)`: Generates uniform discrete time vector $t[n] = n / f_s$.
-  - `compute_signal_stats(signal)`: Extracts statistical features (min, max, peak amplitude, DC offset, RMS).
-  - `compute_fft(signal, fs)`: Calculates normalized one-sided magnitude spectrum using `np.fft.rfft` and `np.fft.rfftfreq`.
-  - `find_peak_frequency(freqs, magnitudes)`: Detects dominant spectral peak above $0\text{ Hz}$.
-  - `add_white_gaussian_noise(signal, target_snr_db, seed)`: Synthesizes AWGN scaled to exact signal power and target SNR.
-  - `validate_cutoff_frequency(cutoff, fs, filter_type)`: Validates mathematical constraints ($0 < f_c < f_s/2$).
-  - `design_butterworth_filter(filter_type, cutoff, fs, order=4)`: Generates Second-Order Sections (SOS) biquad matrix using `scipy.signal.butter`.
-  - `apply_filter(signal, filter_type, cutoff, fs, order=4)`: Applies zero-phase digital filtering using `scipy.signal.sosfiltfilt`.
-  - `compute_filter_response(filter_type, cutoff, fs, order=4, num_points=1024)`: Computes complex frequency response $H(e^{j\omega})$ via `scipy.signal.sosfreqz`.
-  - `calculate_snr(clean_signal, noisy_or_processed_signal)`: Computes ground-truth Signal-to-Noise Ratio in decibels.
+Pure scientific computation library implementing all discrete-time signal processing equations:
+- `compute_time_axis(num_samples, fs)`: Uniform discrete time vector $t[n] = n / f_s$.
+- `compute_signal_stats(signal)`: Time-domain statistical features (min, max, peak amplitude, DC offset, RMS).
+- `compute_fft(signal, fs)`: Normalized one-sided real FFT (`rfft` and `rfftfreq`) scaled such that a pure sine wave of peak amplitude $A$ produces a magnitude peak of $A$.
+- `find_peak_frequency(freqs, magnitudes)`: Detects dominant spectral peak above $20\text{ Hz}$.
+- `detect_noise_segment(signal, fs, segment_duration_s)`: Sliding window minimum-energy search that intelligently locates quiet intervals without blindly assuming speech starts late.
+- `estimate_noise_profile(signal, fs, start_s, end_s, fallback_duration_s)`: Evaluates frequency-dependent mean $\mu_{\text{noise}}(f)$ and standard deviation $\sigma_{\text{noise}}(f)$ magnitude spectra.
+- `spectral_gate_denoise(signal, fs, strength, noise_profile, ...)`: STFT-based soft-knee Wiener masking with spectral floor and temporal smoothing.
+- `denoise_audio(audio, fs, strength, ...)`: Decoupled, zero-GUI entry point for the LINA Linux voice assistant.
+- `calculate_unreferenced_metrics(...)`: Objectively measures noise floor attenuation, speech energy retention, and overall RMS changes for real audio.
+- `compute_spectrogram(signal, fs)`: STFT power spectral density calculation in decibels.
+- `validate_filter_cutoffs(...)`, `apply_filter(...)`, `_apply_butterworth_sos(...)`: 4th-order digital Butterworth filters using Second-Order Sections (SOS) and zero-phase forward-backward filtering (`sosfiltfilt`).
+- `compute_filter_response(...)`: Evaluates theoretical single-pass and effective zero-phase frequency responses via `scipy.signal.sosfreqz`.
+- `add_white_gaussian_noise(...)` & `calculate_snr(...)`: Ground-truth AWGN generation and exact SNR evaluation for synthetic benchmark demonstrations.
 
 ---
 
-## 4. Detailed End-to-End DSP Pipeline
+## 4. End-to-End Processing Lifecycles
 
-The processing lifecycle follows five mathematically rigorous stages:
-
+### 4.1 Primary Production Workflow (Noisy WAV / Live Mic)
 ```text
-[WAV File / Mic]
+[Noisy Audio Input] (WAV / 3s Mic Capture)
        │
        ▼
-[Stage 0: Audio Ingestion]
-  - Stereo downmix: x_mono[n] = (L[n] + R[n]) / 2
+[Stage 0: Audio Ingestion & Format Normalization]
+  - Stereo downmixing: x_mono[n] = (L[n] + R[n]) / 2
   - Metadata: fs, N, duration, RMS
        │
        ├────────────────────────────────────────┐
        ▼                                        ▼
-[Stage 1: Time Domain]                 [Stage 2: Frequency Domain]
-  - t[n] = n / fs                        - X[k] = rfft(x[n])
-  - Min, Max, Peak                       - f[k] = k * fs / N
-  - RMS = sqrt(mean(x^2))                - Mag[k] = 2 * |X[k]| / N
-                                         - Peak Freq = argmax(Mag[k > 0])
+[Stage 1: Time Domain]                 [Stage 2: Frequency Domain & STFT]
+  - t[n] = n / fs                        - FFT: X[k] = rfft(x[n])
+  - RMS = sqrt(mean(x^2))                - Spectrogram: S_xx(f, t)
        │                                        │
        └──────────────────┬─────────────────────┘
                           │
                           ▼
-               [Stage 3: Noise Injection (AWGN)]
-                 - P_x = mean(x[n]^2)
-                 - sigma^2 = P_x / 10^(target_SNR / 10)
-                 - w[n] ~ N(0, sigma^2)
-                 - y[n] = x[n] + w[n]
-                 - Measure SNR_before = 10 * log10(P_x / P_noise)
+               [Stage 3: Noise Profiling]
+                 - Sliding window minimum-energy search OR user range
+                 - Calculate mu_noise(f) and sigma_noise(f)
+                 - Set threshold: T(f) = mu_noise(f) + 1.2 * sigma_noise(f)
                           │
                           ▼
-               [Stage 4: Butterworth SOS Filtering]
-                 - Validate 0 < f_c < fs / 2
-                 - Design 4th-order SOS matrix: scipy.signal.butter(..., output='sos')
-                 - Zero-phase filtering: x_hat[n] = scipy.signal.sosfiltfilt(sos, y[n])
+               [Stage 4: Time-Frequency Spectral Gating]
+                 - Soft Wiener Gain: G(f, t) = 1 / (1 + (alpha * T(f) / |Y(f, t)|)^2)
+                 - Enforce spectral floor: G(f, t) >= beta (0.05 = -26 dB)
+                 - Temporal inter-frame recursive smoothing
+                 - Synthesize: x_hat[n] = ISTFT(G(f, t) * |Y(f, t)| * exp(j * phi(f, t)))
+                 - Amplitude clamping to [-1.0, 1.0]
                           │
                           ▼
                [Stage 5: Objective Evaluation & Output]
-                 - Error signal: e[n] = x_hat[n] - x[n]
-                 - SNR_after = 10 * log10(P_x / mean(e[n]^2))
-                 - Delta SNR = SNR_after - SNR_before
-                 - Safe WAV export with [-1.0, 1.0] clamping
+                 - Noise Floor Attenuation: Delta_Noise = 20 * log10(RMS_noise_in / RMS_noise_out)
+                 - Speech Energy Retention: Ratio = RMS_speech_out / RMS_speech_in
+                 - Ground-Truth SNR: Honestly reported as N/A (Real Audio)
+                 - Dual audio playback (sounddevice) & clamped WAV export
+```
+
+### 4.2 Academic Lab Benchmark Workflow (Synthetic Reference)
+```text
+[Known Clean WAV] -> [Add AWGN at Target SNR dB] -> [Noisy Signal y[n]]
+       │                                                   │
+       │                                                   ▼
+       │                                       [Apply Denoising / Filtering]
+       │                                                   │
+       │                                                   ▼
+       └─────────────────────────────────────────> [Calculate Ground-Truth SNR]
+                                                     - SNR_before = 10 * log10(P_clean / P_noise)
+                                                     - SNR_after  = 10 * log10(P_clean / P_residual)
+                                                     - Delta SNR  = SNR_after - SNR_before
 ```
 
 ---
@@ -160,14 +188,13 @@ The processing lifecycle follows five mathematically rigorous stages:
 ## 5. Numerical Stability & Academic Integrity Safeguards
 
 1. **Second-Order Sections (SOS) Biquad Cascades:**
-   Standard high-order IIR polynomials in $(b, a)$ format suffer severe coefficient quantization noise. Expressing the filter as a cascade of 2nd-order sections guarantees numerical stability across all valid cutoff frequencies.
-2. **Zero-Phase Forward-Backward Filtering (`sosfiltfilt`):**
-   Standard causal filtering introduces non-linear phase distortion and group delays. Zero-phase processing eliminates phase shift entirely:
+   Standard high-order IIR transfer functions in direct form suffer severe coefficient quantization instability. Cascaded second-order biquads guarantee numerical stability across all cutoff frequencies up to Nyquist.
+2. **Zero-Phase Filtering (`sosfiltfilt`):**
+   Forward-backward filtering cancels nonlinear phase distortions, producing identically zero phase response:
    $$\theta_{\text{net}}(\omega) = \theta(\omega) - \theta(\omega) = 0$$
-   This prevents temporal dispersion and preserves transient alignments.
-3. **Strict Array Immutability:**
-   Adding noise or applying a filter allocates and returns a completely new NumPy array. The original `clean_signal` is never mutated in memory.
-4. **Honest SNR Measurement:**
-   SNR is only computed when an authentic clean reference $x[n]$ is available in memory. External unlabelled WAV files without injected noise honestly display `SNR: N/A`.
-5. **Robust Exception Wrapping on Audio Hardware:**
-   If a host machine lacks audio output speakers or microphone hardware, `audio_io.py` catches `sounddevice.PortAudioError` and displays informative warnings without crashing the application.
+3. **Soft-Knee Wiener Spectral Gating vs. Hard Gating:**
+   Binary gating (zeroing bins below threshold) introduces high-frequency musical noise chirps. The continuous soft-knee Wiener mask combined with a $-26\text{ dB}$ spectral floor and temporal smoothing eliminates musical artifacts while preserving speech formants.
+4. **Honest Metric Reporting:**
+   The application never invents an SNR improvement figure when processing unreferenced real-world recordings. Ground-truth SNR is strictly reserved for synthetic experiments where the clean signal is known.
+5. **Decoupled Architecture for LINA:**
+   The core DSP routines in `signal_processing.py` are strictly independent of the GUI framework. LINA voice assistant scripts can import `denoise_audio` directly without launching Qt or Matplotlib.

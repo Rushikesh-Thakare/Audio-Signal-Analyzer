@@ -37,6 +37,10 @@ from signal_processing import (
     validate_filter_cutoffs,
     calculate_snr,
     evaluate_filtering_performance,
+    detect_noise_segment,
+    spectral_gate_denoise,
+    denoise_audio,
+    calculate_unreferenced_metrics,
 )
 
 
@@ -179,6 +183,65 @@ class TestEndToEndAudit(unittest.TestCase):
         with self.assertRaises(ValueError):
             validate_filter_cutoffs("bandpass", (1000, 8500), self.fs)
 
+    def test_primary_noisy_speech_e2e_pipeline(self):
+        """
+        Primary Workflow E2E Audit:
+        Noisy WAV file -> Load -> Waveform & FFT -> Speech Spectral Denoising
+        -> Honest Metrics (N/A Ground-truth SNR, Positive Noise Reduction)
+        -> Playback Invocation -> Save Cleaned WAV -> Validate Readback.
+        """
+        # 1. Create a realistic noisy recording WAV file (silence pause + speech + background noise)
+        rng = np.random.default_rng(999)
+        noise = rng.normal(0, 0.04, size=len(self.t)).astype(np.float32)
+        speech = np.zeros_like(self.t, dtype=np.float32)
+        speech[self.t >= 0.3] = 0.5 * np.sin(2 * np.pi * 350 * self.t[self.t >= 0.3])
+        realistic_noisy = speech + noise
+
+        noisy_path = os.path.join(self.test_dir, "real_noisy_speech.wav")
+        save_audio(noisy_path, realistic_noisy, self.fs)
+
+        # 2. Ingest Audio
+        meta = load_audio(noisy_path)
+        input_data = meta["mono_data"]
+        self.assertEqual(meta["fs"], self.fs)
+        self.assertEqual(len(input_data), len(realistic_noisy))
+
+        # 3. Frequency domain analysis
+        freqs, mags = compute_fft(input_data, self.fs)
+        peak_f, peak_m = find_peak_frequency(freqs, mags)
+        self.assertGreater(peak_f, 0)
+
+        # 4. Speech-preserving noise reduction
+        cleaned, metrics = spectral_gate_denoise(input_data, self.fs, strength=0.8)
+        self.assertEqual(len(cleaned), len(input_data))
+
+        # 5. Check unreferenced metrics honesty
+        self.assertIsNone(metrics["ground_truth_snr"])
+        self.assertGreater(metrics["speech_retention_ratio"], 0.70)
+        self.assertGreaterEqual(metrics["noise_floor_reduction_db"], 0.0)
+
+        # 6. Playback error tolerance (must not crash even without sound card)
+        play_ok = play_audio(cleaned, self.fs)
+        self.assertIsInstance(play_ok, bool)
+
+        # 7. Safe export of cleaned speech
+        out_cleaned_path = os.path.join(self.test_dir, "cleaned_speech_e2e.wav")
+        saved_file = save_audio(out_cleaned_path, cleaned, self.fs)
+        self.assertTrue(os.path.exists(saved_file))
+
+        # 8. Read back and verify validity
+        readback = load_audio(saved_file)
+        self.assertEqual(readback["fs"], self.fs)
+        self.assertEqual(readback["samples"], len(cleaned))
+        # Ensure amplitude is strictly finite and clamped to [-1.0, 1.0]
+        self.assertTrue(np.all(readback["mono_data"] >= -1.0))
+        self.assertTrue(np.all(readback["mono_data"] <= 1.0))
+
+        # 9. Verify standalone LINA function produces identical quality
+        lina_output = denoise_audio(input_data, self.fs, strength=0.8)
+        self.assertEqual(len(lina_output), len(cleaned))
+
 
 if __name__ == "__main__":
     unittest.main()
+

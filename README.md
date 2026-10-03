@@ -1,64 +1,47 @@
 # Audio Signal Analyzer and Noise Reduction System Using FFT
 
-An academic **Signals and Systems (SNS)** mini project demonstrating core digital signal processing (DSP) principles through an interactive desktop application.
+An academic **Signals and Systems (SNS)** project demonstrating core digital signal processing (DSP) principles through an interactive desktop application.
 
-Built strictly using classical linear time-invariant (LTI) signal processing methods in Python:
-- **Discrete-time signal representation and time-domain analysis**
-- **Frequency-domain transformation via Fast Fourier Transform (FFT)**
-- **Controlled signal degradation using Additive White Gaussian Noise (AWGN)**
-- **Digital Butterworth filtering (Low-Pass, High-Pass, Band-Pass) with Second-Order Sections (SOS)**
-- **Zero-phase forward-backward filtering (`sosfiltfilt`) to prevent phase distortion**
-- **Objective Signal-to-Noise Ratio (SNR) evaluation before and after filtering**
-- **Filter frequency response visualization (Bode magnitude & phase)**
-- **Interactive desktop GUI built with PySide6 and Matplotlib**
+Developed as a standalone audio preprocessing engine for the **LINA Linux Voice Assistant** and an educational laboratory workstation for Signals & Systems engineering students.
 
 ---
 
-## Features
+## Key Capabilities & Core Workflows
 
-1. **WAV Audio Loading & Format Handling:**
-   - Supports 16-bit, 24-bit, 32-bit PCM and float WAV files via `soundfile`.
-   - Automatic downmixing of multi-channel stereo audio to mono via arithmetic channel averaging:
-     $$x_{\text{mono}}[n] = \frac{x_L[n] + x_R[n]}{2}$$
-   - Amplitude clipping protection on export to keep output strictly within $[-1.0, 1.0]$.
+### 1. Primary Workflow: Noisy Audio Ingestion & Speech Denoising
+- **Input:** Real-world noisy WAV recordings or 3-second live microphone capture.
+- **Speech-Preserving Spectral Gating:** Applies Short-Time Fourier Transform (STFT) with soft-knee Wiener-type gain masking to suppress ambient stationary background noise (PC fan noise, HVAC hum, room rumble, electrical hiss) while preserving vocal formants and speech intelligibility.
+- **Intelligent Noise Profiling:** Does **not** blindly assume the initial 0.3 seconds is noise (which would corrupt recordings where the user speaks immediately). Instead, scans the recording using sliding windows to detect the quietest pause, allows manual user range selection, or samples leading silence.
+- **Dual Playback & Clamped Export:** Listen to the input audio vs. the cleaned audio side-by-side using `sounddevice`, and export 16-bit PCM WAV safely clamped to $[-1.0, 1.0]$ without digital clipping.
 
-2. **Signal Analysis & Peak Frequency Detection:**
-   - Time axis generation: $t[n] = n / f_s$.
-   - Comprehensive statistical extraction: Minimum, Maximum, Peak Amplitude, DC Offset, and Root-Mean-Square (RMS) Energy:
-     $$\text{RMS} = \sqrt{\frac{1}{N}\sum_{n=0}^{N-1} |x[n]|^2}$$
-   - Normalized one-sided real FFT (`rfft` and `rfftfreq`) scaled such that a pure sine wave of peak amplitude $A$ produces a magnitude peak of $A$.
-   - Automatic dominant peak frequency detection with spectral indicator markers.
+### 2. Standalone LINA Voice Assistant Preprocessor
+- Provides a completely decoupled, zero-GUI Python function:
+  ```python
+  from signal_processing import denoise_audio
 
-3. **Controlled Noise Generation (AWGN):**
-   - Synthesizes zero-mean Additive White Gaussian Noise $w[n] \sim \mathcal{N}(0, \sigma^2)$.
-   - Noise variance calculated from input signal power $P_x$ and user-specified target SNR (dB):
-     $$\sigma^2 = \frac{P_x}{10^{\text{target\_SNR}_{\text{dB}} / 10}}$$
-   - Strict immutability: clean signal array is never mutated; noisy signal is allocated separately.
-   - Configurable pseudo-random seed for deterministic laboratory repeatability.
+  # Accepts 1D numpy array and sampling rate; returns cleaned 1D audio
+  clean_audio = denoise_audio(raw_mic_stream, fs=16000, strength=0.75)
+  ```
+- 100% offline, lightweight, deterministic, and requires no GPU or external cloud/neural dependencies.
 
-4. **Digital Butterworth Filtering:**
-   - Implements 4th-order Low-Pass, High-Pass, and Band-Pass IIR Butterworth filters.
-   - Designed using Second-Order Sections (SOS) matrix format for maximum numerical stability.
-   - Forward-backward zero-phase filtering (`scipy.signal.sosfiltfilt`) eliminates group delay and phase lag.
-   - Strict mathematical boundary validation against the Nyquist frequency ($f_c < f_s / 2$) and cutoff ordering ($f_{\text{low}} < f_{\text{high}}$).
+### 3. Classical Digital Filtering (Butterworth SOS)
+- 4th-order Low-Pass, High-Pass, and Band-Pass IIR filters implemented in **Second-Order Sections (SOS)** biquad cascade format for high numerical stability.
+- Bidirectional zero-phase filtering (`scipy.signal.sosfiltfilt`) prevents phase lag and temporal dispersion.
+- Interactive Bode magnitude frequency response $|H(f)|$ tab displaying single-pass and effective zero-phase curves with $-3\text{ dB}$ cutoff markers.
 
-5. **Filter Frequency Response (Bode Plot):**
-   - Dedicated interactive tab plotting filter magnitude response $|H(e^{j\omega})|$ in decibels (dB) and phase response in degrees.
-   - Displays $-3\text{ dB}$ half-power cutoff lines and passband/stopband behavior.
+### 4. Honest Scientific Evaluation & Dual Metric Engine
+- **Real Audio (Unreferenced):** A real-world recording has no clean ground truth. Rather than fabricating or inventing an SNR number, the system honestly reports:
+  - **Noise Floor Attenuation ($\text{dB}$):** Measured power reduction on stationary noise pauses.
+  - **Speech Energy Retention ($\%$):** Ratio of active speech energy preserved (proves speech was not attenuated away).
+  - **Overall RMS Level Change ($\text{dB}$)**.
+  - **Ground-Truth SNR:** Honestly labelled as `N/A (Real Audio — No clean reference)`.
+- **Academic Lab Benchmark Tool:** Optional feature to inject controlled Additive White Gaussian Noise (AWGN) at a chosen target SNR into a clean reference signal to calculate and demonstrate mathematically exact ground-truth $\text{SNR}_{\text{before}}$, $\text{SNR}_{\text{after}}$, and $\Delta\text{SNR}$ improvement.
 
-6. **Ground-Truth SNR Evaluation:**
-   - Mathematically accurate Signal-to-Noise Ratio computed using clean ground-truth reference $x[n]$ and error signal $e[n] = y[n] - x[n]$:
-     $$\text{SNR}_{\text{dB}} = 10 \log_{10}\left( \frac{\sum_{n=0}^{N-1} x[n]^2}{\sum_{n=0}^{N-1} (y[n] - x[n])^2} \right)$$
-   - Evaluates **SNR Before Filtering**, **SNR After Filtering**, and **SNR Improvement ($\Delta$SNR)**.
-   - Academic integrity: never fabricates SNR when a clean reference is absent.
-
-7. **Interactive GUI & Audio Playback:**
-   - Clean, modern layout built with **PySide6 (Qt)** and integrated **Matplotlib** canvases.
-   - Dual inspection modes: Full 3-Stage Pipeline Overview (Original vs. Noisy vs. Filtered) and high-detail individual tabs.
-   - Safe audio playback controls (`Play Original`, `Play Noisy`, `Play Filtered`, `Stop Audio`) powered by `sounddevice`.
-   - Export Filtered WAV dialog.
-   - Reset button to clear all loaded data and return to initial state.
-   - Optional 3-second live microphone recording with non-blocking `QThread` worker and graceful hardware fallback.
+### 5. Multi-Domain Visualizations (PySide6 & Matplotlib)
+- **Pipeline Overview:** Side-by-side time waveforms and FFT magnitude spectra.
+- **Stage Detail Views:** Zoomed time-domain signals and calibrated one-sided magnitude spectra with dominant peak frequency annotations.
+- **Time-Frequency Spectrograms:** High-resolution STFT power spectral density heatmaps displaying vocal harmonic tracks and noise floor reduction.
+- **Bode Response:** Theoretical transfer function plots.
 
 ---
 
@@ -67,26 +50,27 @@ Built strictly using classical linear time-invariant (LTI) signal processing met
 ```text
 SNS_mini_project/
 ├── .venv/                      # Python virtual environment
-├── app.py                      # Application launch script
-├── gui.py                      # PySide6 desktop GUI and plotting integration
+├── app.py                      # Primary desktop application entry point
+├── gui.py                      # PySide6 desktop GUI & Matplotlib plotting integration
 ├── audio_io.py                 # Audio I/O, downmixing, RMS, playback, microphone
-├── signal_processing.py        # DSP core: FFT, AWGN, Butterworth SOS filters, SNR
+├── signal_processing.py        # DSP core: STFT spectral gating, FFT, AWGN, Butterworth SOS, SNR
 ├── requirements.txt            # Pinned dependencies
 ├── README.md                   # Project overview and instructions
-├── ARCHITECTURE.md             # System architecture and DSP pipeline
-├── DEMO_SCRIPT.md              # Demonstration walkthrough and script
-├── VIVA.md                     # 20 Signals & Systems viva exam questions & answers
+├── ARCHITECTURE.md             # System architecture and mathematical DSP pipeline
+├── DEMO_SCRIPT.md              # Demonstration walkthrough and viva demo guide
+├── VIVA.md                     # 25 Signals & Systems viva exam questions & detailed answers
 ├── sample_audio/               # Sample WAV audio files
 │   ├── generate_samples.py     # Generator for synthetic test audio
-│   ├── sine_440hz.wav          # 440 Hz pure tone (tuning A)
-│   ├── synthetic_voice.wav     # Multi-harmonic speech simulation
+│   ├── sine_440hz.wav          # 440 Hz reference tone
+│   ├── synthetic_voice.wav     # Multi-harmonic vocal formant simulation
 │   └── mixed_tone_300hz_3500hz.wav # Dual-tone signal for filter demo
 ├── output/                     # Saved processed audio files
-└── tests/                      # Automated test suite (47 unit/integration tests)
-    ├── test_audio_io.py        # Audio I/O, microphone, and playback tests
-    ├── test_signal_processing.py # DSP math, FFT, noise, filter, and SNR tests
-    ├── test_gui.py             # Headless PySide6 GUI workflow tests
-    ├── test_e2e_audit.py       # End-to-end DSP pipeline audit tests
+└── tests/                      # Automated test suite (60 unit & integration tests)
+    ├── test_audio_io.py        # Audio I/O, downmixing, clipping, and playback tests
+    ├── test_signal_processing.py # Discrete time, FFT, Butterworth SOS, and SNR tests
+    ├── test_denoising.py       # Speech spectral gating, noise profiling, and LINA tests
+    ├── test_gui.py             # Headless PySide6 GUI workflow & widget interaction tests
+    ├── test_e2e_audit.py       # End-to-end DSP pipeline and robustness audit tests
     └── verify_launch.py        # App initialization and smoke test script
 ```
 
@@ -117,13 +101,13 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-Pinned dependencies in `requirements.txt`:
-- `numpy==2.2.3`
-- `scipy==1.15.2`
-- `matplotlib==3.10.1`
-- `soundfile==0.13.1`
-- `sounddevice==0.5.1`
-- `PySide6==6.8.2.1`
+Core dependencies in `requirements.txt`:
+- `numpy>=1.23.0`
+- `scipy>=1.9.0`
+- `matplotlib>=3.6.0`
+- `soundfile>=0.12.0`
+- `sounddevice>=0.4.6`
+- `PySide6>=6.5.0`
 
 ### 4. Generate Sample Audio Files
 
@@ -131,10 +115,10 @@ Pinned dependencies in `requirements.txt`:
 python sample_audio/generate_samples.py
 ```
 
-This generates three standardized test signals in `sample_audio/`:
-- `sine_440hz.wav`: Pure 440 Hz reference tone ($f_s = 44100\text{ Hz}$, duration $2.0\text{s}$).
-- `synthetic_voice.wav`: 150 Hz fundamental frequency with 5 voice formants.
-- `mixed_tone_300hz_3500hz.wav`: Low-frequency 300 Hz tone mixed with high-frequency 3500 Hz noise tone ($f_s = 16000\text{ Hz}$, duration $2.0\text{s}$).
+Generates three test signals in `sample_audio/`:
+- `sine_440hz.wav`: Pure 440 Hz reference tone ($f_s = 44100\text{ Hz}$).
+- `synthetic_voice.wav`: 150 Hz fundamental frequency with vocal formants.
+- `mixed_tone_300hz_3500hz.wav`: Low-frequency 300 Hz tone mixed with high-frequency 3500 Hz noise tone.
 
 ---
 
@@ -147,7 +131,7 @@ python app.py
 ```
 *(Or `.\.venv\Scripts\python.exe app.py`)*
 
-### 2. Run the Full Test Suite
+### 2. Run the Full Automated Test Suite (60 Tests)
 
 ```powershell
 python -m unittest discover -s tests -p "test_*.py" -v
@@ -163,61 +147,74 @@ python tests/verify_launch.py
 
 ## Step-by-Step Usage Guide
 
-1. **Load an Audio File:**
-   - Click **Load WAV File** and select `sample_audio/mixed_tone_300hz_3500hz.wav`.
-   - The metadata panel updates with sample rate, duration, channel count, RMS energy, and dominant peak frequency.
-   - The time-domain waveform and FFT spectrum appear in the **Pipeline Overview** and **Original Signal** tabs.
+### Primary Workflow: Cleaning Noisy Audio
+1. **Load Noisy Audio:**
+   - Click **Load Audio WAV** and choose a recorded audio file (e.g., `sample_audio/synthetic_voice.wav` or your own noisy voice recording).
+   - Alternatively, click **Record (3s)** to capture audio directly from your microphone.
+   - The waveform, FFT spectrum, and Spectrogram appear in the visualization panel.
+2. **Configure Noise Reduction:**
+   - Leave **Method** set to `Speech Spectral Denoising (STFT Wiener)`.
+   - Set the **Strength** slider (default 75%).
+   - Select **Noise Sample**: Choose `Auto-Detect Quietest Segment` (default), `Leading Segment (First 0.3s)`, or `Custom Range`.
+3. **Process Audio:**
+   - Click **✨ Process & Clean Audio**.
+   - The cleaned waveform, cleaned spectrum, and cleaned spectrogram update immediately.
+   - Check the **Quantitative Evaluation** card: see measured **Noise Floor Attenuation** (e.g. 8–18 dB) and **Speech Energy Retention** (e.g. 92–98%).
+4. **Listen & Compare:**
+   - Click **▶ Play Input Audio** to hear the original noisy track.
+   - Click **▶ Play Cleaned Audio** to hear the restored, denoised result.
+5. **Export:**
+   - Click **💾 Save Cleaned WAV** to export the result to the `output/` folder. Overwrite protection prevents accidental overwriting of the input file.
 
-2. **Add Controlled Noise:**
-   - In the **Noise Generator** card, set the target SNR (e.g., `10.0 dB`).
-   - Click **Add Noise**.
-   - The noisy waveform and flat noise floor on the FFT spectrum are rendered.
-   - The **SNR Before** displays `~10.0 dB`.
-   - Click **Play Noisy** to listen to the degraded audio.
-
-3. **Configure & Inspect Filter:**
-   - Select **Filter Type**: Choose `Low-pass`.
-   - Set **Cutoff Frequency (Hz)**: Enter `1000.0` (well above 300 Hz and below 3500 Hz).
-   - Switch to the **Filter Response** tab to inspect the Bode magnitude plot and verify attenuation at 3500 Hz.
-
-4. **Apply Filter:**
-   - Click **Apply Filter**.
-   - The filtered waveform and cleaned FFT spectrum appear.
-   - The high-frequency 3500 Hz tone and high-frequency noise floor are visibly attenuated.
-   - **SNR After** and **SNR Improvement ($\Delta$SNR)** update showing positive decibel improvement.
-
-5. **Listen & Export:**
-   - Click **Play Filtered** to hear the restored signal.
-   - Click **Save Filtered WAV** to export the result into `output/`.
-
-6. **Reset:**
-   - Click **Reset All** to clear all waveforms and return to a clean initial state.
-
----
-
-## Troubleshooting
-
-| Issue | Cause | Solution |
-| :--- | :--- | :--- |
-| `Cutoff frequency must be less than Nyquist limit (fs / 2)` | The specified filter cutoff exceeds half of the sampling rate. | Ensure $f_{\text{cutoff}} < f_s / 2$. The GUI automatically constrains the maximum input to $(f_s/2 - 1)\text{ Hz}$. |
-| `Low cutoff must be strictly less than high cutoff` | For band-pass filter, the lower cutoff was entered greater than or equal to the higher cutoff. | Set $f_{\text{low}} < f_{\text{high}}$ (e.g., $300\text{ Hz}$ and $3000\text{ Hz}$). |
-| `[Audio Playback Notice] Could not play audio` | No default audio output device (speakers/headphones) detected by the OS. | Connect an output device. The application catches this safely and displays a warning without crashing. |
-| `No audio recording device (microphone) detected` | No microphone connected or permission denied. | The app displays an alert and prompts you to use `Load WAV File` instead. |
-| Headless test error: `Could not connect to display` | Running on a headless CI/Linux server without an X11 display. | Run with `QT_QPA_PLATFORM=offscreen python -m unittest discover -s tests`. |
+### Academic Demonstration: Synthetic AWGN Benchmark Mode
+1. Load a clean audio file (e.g., `sample_audio/sine_440hz.wav`).
+2. Scroll to Section 5: **Academic Lab Benchmark Tool**.
+3. Choose a target SNR (e.g., `10.0 dB`) and click **⚡ Inject Known AWGN (Lab Test)**.
+4. The system stores the original audio as a ground-truth reference and corrupts the input.
+5. Click **✨ Process & Clean Audio**.
+6. The metrics card now displays exact ground-truth values:
+   - `SNR Before: 10.02 dB`
+   - `SNR After: 18.45 dB`
+   - `SNR Improvement: +8.43 dB`
 
 ---
 
-## Academic DSP Limitations
+## DSP Theory & Mathematical Foundations
 
-1. **LTI Filtering vs. In-Band Noise:**
-   - Butterworth filters are linear time-invariant (LTI) frequency-selective filters. They attenuate noise in stopbands, but cannot separate noise that occupies the same frequency band as the desired signal.
-   - Non-stationary or in-band noise reduction requires adaptive filters (e.g., LMS/RLS) or spectral subtraction.
+### 1. Discrete-Time Fourier Transform (STFT)
+Audio $x[n]$ is segmented into windowed frames using a Hann window $w[m]$:
+$$X(k, m) = \sum_{n=0}^{N-1} x[n + mH] w[n] e^{-j 2\pi k n / N}$$
+where $H$ is the hop size (75% overlap) and $N$ is the FFT segment length.
 
-2. **Zero-Phase Offline Processing:**
-   - Zero-phase filtering (`sosfiltfilt`) processes the signal forward then backward. This requires the entire signal to be held in memory, making it suitable for recorded audio files, but not causally realizable in real-time streaming audio without latency.
+### 2. Wiener-Type Soft Spectral Mask
+For frequency bin $k$ and time frame $m$, the gain mask is:
+$$G(k, m) = \max\left(\beta, \frac{1}{1 + \left(\frac{\alpha \cdot T_{\text{noise}}[k]}{|Y(k, m)| + \epsilon}\right)^2}\right)$$
+where:
+- $T_{\text{noise}}[k] = \mu_{\text{noise}}[k] + 1.2 \cdot \sigma_{\text{noise}}[k]$ is the noise threshold.
+- $\alpha$ is the user-controlled **reduction strength** (0.0 to 1.5).
+- $\beta = 0.05$ (-26 dB) is the **spectral floor** that prevents musical noise chirps.
 
-3. **Ground-Truth Dependency for SNR:**
-   - Exact mathematical SNR calculation requires access to the uncorrupted clean reference signal $x[n]$. In real-world field recordings where only noisy audio is captured, true SNR cannot be computed directly and must be estimated via statistical Voice Activity Detection (VAD).
+### 3. Zero-Phase Inverse STFT (ISTFT) Synthesis
+$$\hat{x}[n] = \text{ISTFT}\left( G(k, m) \cdot |Y(k, m)| \cdot e^{j \phi(k, m)} \right)$$
+The phase spectrum $\phi(k, m)$ is fully preserved, preventing temporal dispersion.
 
-4. **Butterworth Roll-Off Slope:**
-   - The 4th-order Butterworth filter exhibits a smooth roll-off slope of $-24\text{ dB/octave}$ ($-80\text{ dB/decade}$). It does not possess an infinite ("brick-wall") transition band; frequency components immediately adjacent to the cutoff frequency experience partial attenuation.
+---
+
+## System Limitations & Design Boundaries
+
+1. **Stationary vs. Non-Stationary Noise:**
+   - Spectral gating assumes the noise spectrum is reasonably stationary over the duration of the clip (e.g., steady fan hum, computer background noise, HVAC rumble).
+   - Highly transient or sudden impulsive noises (door slams, claps, background babble speech) require multi-microphone spatial beamforming or deep recurrent models.
+2. **Extreme Negative SNR ($< -10\text{ dB}$):**
+   - If the speech signal is substantially weaker than the noise floor across all frequency bins, spectral gating will attenuate speech together with the noise floor.
+3. **Acoustic Reverberation:**
+   - Spectral gating suppresses additive noise but does not deconvolve room reverberation (echoes caused by wall reflections).
+4. **Causality & Real-Time Latency:**
+   - The STFT implementation uses bidirectional framing and temporal smoothing. In a live streaming voice assistant pipeline, causal asymmetric windows with fixed algorithmic delay (typically 20–40 ms) must be employed.
+
+---
+
+## Author & Project Information
+- **Course:** Signals and Systems (SNS) Mini Project
+- **Target Integration:** LINA Linux Voice Assistant Audio Front-End
+- **Frameworks:** Python, SciPy, NumPy, Matplotlib, PySide6 (Qt)
